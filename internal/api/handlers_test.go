@@ -3,6 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +28,7 @@ func (s *stubAnalyzer) AnalyzePR(ctx context.Context, input orchestrator.Analyze
 }
 
 func TestHealth(t *testing.T) {
-	handlers := NewHandlers(&stubAnalyzer{})
+	handlers := NewHandlers(&stubAnalyzer{}, "")
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	res := httptest.NewRecorder()
 
@@ -40,7 +43,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestWebhookGitHubMissingHeader(t *testing.T) {
-	handlers := NewHandlers(&stubAnalyzer{})
+	handlers := NewHandlers(&stubAnalyzer{}, "")
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", nil)
 	res := httptest.NewRecorder()
 
@@ -52,7 +55,7 @@ func TestWebhookGitHubMissingHeader(t *testing.T) {
 }
 
 func TestWebhookGitHubIgnoredEvent(t *testing.T) {
-	handlers := NewHandlers(&stubAnalyzer{})
+	handlers := NewHandlers(&stubAnalyzer{}, "")
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", nil)
 	req.Header.Set("X-GitHub-Event", "ping")
 	res := httptest.NewRecorder()
@@ -66,7 +69,7 @@ func TestWebhookGitHubIgnoredEvent(t *testing.T) {
 
 func TestWebhookGitHubDispatchesAnalysis(t *testing.T) {
 	stub := &stubAnalyzer{result: orchestrator.AnalyzeResult{Summary: "analysis queued"}}
-	handlers := NewHandlers(stub)
+	handlers := NewHandlers(stub, "")
 
 	payload := map[string]any{
 		"action": "opened",
@@ -107,8 +110,56 @@ func TestWebhookGitHubDispatchesAnalysis(t *testing.T) {
 	}
 }
 
+func TestWebhookGitHubSignatureMissing(t *testing.T) {
+	handlers := NewHandlers(&stubAnalyzer{}, "secret")
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewBufferString(`{"action":"opened"}`))
+	req.Header.Set("X-GitHub-Event", "pull_request")
+	res := httptest.NewRecorder()
+
+	handlers.WebhookGitHub(res, req)
+
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", res.Code)
+	}
+}
+
+func TestWebhookGitHubSignatureValid(t *testing.T) {
+	stub := &stubAnalyzer{result: orchestrator.AnalyzeResult{Summary: "analysis queued"}}
+	handlers := NewHandlers(stub, "secret")
+
+	payload := map[string]any{
+		"action": "opened",
+		"number": 7,
+		"pull_request": map[string]any{
+			"number": 7,
+			"head":   map[string]any{"sha": "abc123"},
+		},
+		"repository": map[string]any{
+			"full_name": "acme/demo",
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("failed to marshal payload: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "pull_request")
+	req.Header.Set("X-Hub-Signature-256", signPayload("secret", body))
+	res := httptest.NewRecorder()
+
+	handlers.WebhookGitHub(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d", res.Code)
+	}
+	if !stub.called {
+		t.Fatalf("expected analyzer to be called")
+	}
+}
+
 func TestAnalyzePRInvalidJSON(t *testing.T) {
-	handlers := NewHandlers(&stubAnalyzer{})
+	handlers := NewHandlers(&stubAnalyzer{}, "")
 	req := httptest.NewRequest(http.MethodPost, "/analyze/pr", bytes.NewBufferString("not-json"))
 	res := httptest.NewRecorder()
 
@@ -121,7 +172,7 @@ func TestAnalyzePRInvalidJSON(t *testing.T) {
 
 func TestAnalyzePRAcceptsRequest(t *testing.T) {
 	stub := &stubAnalyzer{result: orchestrator.AnalyzeResult{Summary: "analysis queued"}}
-	handlers := NewHandlers(stub)
+	handlers := NewHandlers(stub, "")
 
 	payload := map[string]any{
 		"repository":  "acme/demo",
@@ -144,4 +195,10 @@ func TestAnalyzePRAcceptsRequest(t *testing.T) {
 	if !stub.called {
 		t.Fatalf("expected analyzer to be called")
 	}
+}
+
+func signPayload(secret string, payload []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }

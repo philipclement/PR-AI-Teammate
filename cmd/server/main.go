@@ -21,7 +21,8 @@ func main() {
 	}
 
 	orchestratorService := orchestrator.NewService()
-	handlers := api.NewHandlers(orchestratorService)
+	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
+	handlers := api.NewHandlers(orchestratorService, webhookSecret)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", methodGuard(handlers.Health, http.MethodGet, http.MethodHead))

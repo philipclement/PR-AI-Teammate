@@ -2,17 +2,23 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/example/pr-ai-teammate/internal/orchestrator"
 	"github.com/example/pr-ai-teammate/internal/types"
 )
 
 type Handlers struct {
-	orchestrator Analyzer
+	orchestrator  Analyzer
+	webhookSecret string
 }
 
 type Analyzer interface {
@@ -21,8 +27,11 @@ type Analyzer interface {
 
 var _ Analyzer = (*orchestrator.Service)(nil)
 
-func NewHandlers(orchestrator Analyzer) *Handlers {
-	return &Handlers{orchestrator: orchestrator}
+func NewHandlers(orchestrator Analyzer, webhookSecret string) *Handlers {
+	return &Handlers{
+		orchestrator:  orchestrator,
+		webhookSecret: webhookSecret,
+	}
 }
 
 func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +48,11 @@ func (h *Handlers) WebhookGitHub(w http.ResponseWriter, r *http.Request) {
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "unable to read request body")
+		return
+	}
+
+	if err := h.verifySignature(r.Header.Get("X-Hub-Signature-256"), payload); err != nil {
+		respondError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 
@@ -108,4 +122,34 @@ func respondJSON(w http.ResponseWriter, status int, payload any) {
 
 func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
+}
+
+func (h *Handlers) verifySignature(signature string, payload []byte) error {
+	if h.webhookSecret == "" {
+		return nil
+	}
+	if signature == "" {
+		return fmt.Errorf("missing X-Hub-Signature-256 header")
+	}
+
+	const prefix = "sha256="
+	if !strings.HasPrefix(signature, prefix) {
+		return fmt.Errorf("invalid X-Hub-Signature-256 header")
+	}
+
+	expectedMAC := hmac.New(sha256.New, []byte(h.webhookSecret))
+	expectedMAC.Write(payload)
+	expected := expectedMAC.Sum(nil)
+
+	receivedHex := strings.TrimPrefix(signature, prefix)
+	received, err := hex.DecodeString(receivedHex)
+	if err != nil {
+		return fmt.Errorf("invalid X-Hub-Signature-256 header")
+	}
+
+	if !hmac.Equal(received, expected) {
+		return fmt.Errorf("invalid webhook signature")
+	}
+
+	return nil
 }

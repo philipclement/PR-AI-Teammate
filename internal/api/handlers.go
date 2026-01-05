@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -11,10 +12,16 @@ import (
 )
 
 type Handlers struct {
-	orchestrator *orchestrator.Service
+	orchestrator Analyzer
 }
 
-func NewHandlers(orchestrator *orchestrator.Service) *Handlers {
+type Analyzer interface {
+	AnalyzePR(ctx context.Context, input orchestrator.AnalyzeInput) (orchestrator.AnalyzeResult, error)
+}
+
+var _ Analyzer = (*orchestrator.Service)(nil)
+
+func NewHandlers(orchestrator Analyzer) *Handlers {
 	return &Handlers{orchestrator: orchestrator}
 }
 

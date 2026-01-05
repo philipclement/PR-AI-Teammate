@@ -3,10 +3,7 @@ package api
 import (
 	"encoding/json"
 	"io"
-<<<<<<< ours
-=======
 	"log"
->>>>>>> theirs
 	"net/http"
 
 	"github.com/example/pr-ai-teammate/internal/orchestrator"
@@ -26,10 +23,6 @@ func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) WebhookGitHub(w http.ResponseWriter, r *http.Request) {
-<<<<<<< ours
-	_, _ = io.ReadAll(r.Body)
-	respondJSON(w, http.StatusAccepted, types.WebhookResponse{Status: "received"})
-=======
 	event := r.Header.Get("X-GitHub-Event")
 	if event == "" {
 		respondError(w, http.StatusBadRequest, "missing X-GitHub-Event header")
@@ -75,7 +68,6 @@ func (h *Handlers) WebhookGitHub(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("queued analysis for %s#%d (%s)", prEvent.Repository.FullName, prEvent.PullRequest.Number, prEvent.PullRequest.Head.SHA)
 	respondJSON(w, http.StatusAccepted, types.WebhookResponse{Status: result.Summary})
->>>>>>> theirs
 }
 
 func (h *Handlers) AnalyzePR(w http.ResponseWriter, r *http.Request) {

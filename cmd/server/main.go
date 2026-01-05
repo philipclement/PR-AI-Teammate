@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/example/pr-ai-teammate/internal/api"
+	"github.com/example/pr-ai-teammate/internal/github"
 	"github.com/example/pr-ai-teammate/internal/orchestrator"
 )
 
@@ -20,7 +21,9 @@ func main() {
 		port = "8080"
 	}
 
-	orchestratorService := orchestrator.NewService()
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	githubClient := github.NewClient(githubToken)
+	orchestratorService := orchestrator.NewService(githubClient)
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	handlers := api.NewHandlers(orchestratorService, webhookSecret)
 

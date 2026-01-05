@@ -3,12 +3,17 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"github.com/example/pr-ai-teammate/internal/github"
 )
 
-type Service struct{}
+type Service struct {
+	githubClient *github.Client
+}
 
-func NewService() *Service {
-	return &Service{}
+func NewService(githubClient *github.Client) *Service {
+	return &Service{githubClient: githubClient}
 }
 
 type AnalyzeInput struct {
@@ -32,6 +37,25 @@ func (s *Service) AnalyzePR(ctx context.Context, input AnalyzeInput) (AnalyzeRes
 		return AnalyzeResult{}, fmt.Errorf("commit SHA is required")
 	}
 
-	// TODO: fetch PR diff, run rule engine, static analysis, and AI reviewer.
-	return AnalyzeResult{Summary: "analysis queued"}, nil
+	if s.githubClient == nil {
+		return AnalyzeResult{Summary: "analysis queued (no github client configured)"}, nil
+	}
+
+	pr, err := s.githubClient.FetchPullRequest(ctx, input.Repository, input.PullNumber)
+	if err != nil {
+		return AnalyzeResult{}, err
+	}
+	diff, err := s.githubClient.FetchPullRequestDiff(ctx, input.Repository, input.PullNumber)
+	if err != nil {
+		return AnalyzeResult{}, err
+	}
+
+	// TODO: split diff by file, run rule engine, static analysis, and AI reviewer.
+	summary := fmt.Sprintf("analysis queued for %s#%d (%s) with %d diff bytes",
+		input.Repository,
+		input.PullNumber,
+		strings.TrimSpace(pr.Title),
+		len(diff),
+	)
+	return AnalyzeResult{Summary: summary}, nil
 }

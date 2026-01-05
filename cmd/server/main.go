@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,13 +24,15 @@ func main() {
 	handlers := api.NewHandlers(orchestratorService)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", handlers.Health)
-	mux.HandleFunc("POST /webhook/github", handlers.WebhookGitHub)
-	mux.HandleFunc("POST /analyze/pr", handlers.AnalyzePR)
+	mux.HandleFunc("/health", methodGuard(handlers.Health, http.MethodGet, http.MethodHead))
+	mux.HandleFunc("/health/", methodGuard(handlers.Health, http.MethodGet, http.MethodHead))
+	mux.HandleFunc("/webhook/github", methodGuard(handlers.WebhookGitHub, http.MethodPost))
+	mux.HandleFunc("/analyze/pr", methodGuard(handlers.AnalyzePR, http.MethodPost))
+	mux.HandleFunc("/", notFoundHandler)
 
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           mux,
+		Handler:           requestLogger(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -52,4 +55,34 @@ func main() {
 	if err := <-shutdownErr; err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
+}
+
+func methodGuard(handler http.HandlerFunc, methods ...string) http.HandlerFunc {
+	allowed := make(map[string]struct{}, len(methods))
+	for _, method := range methods {
+		allowed[method] = struct{}{}
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := allowed[r.Method]; !ok {
+			w.Header().Set("Allow", allowHeader(methods))
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+func allowHeader(methods []string) string {
+	return strings.Join(methods, ", ")
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s", r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	http.NotFound(w, r)
 }

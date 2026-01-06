@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/example/pr-ai-teammate/internal/ai"
 	"github.com/example/pr-ai-teammate/internal/api"
 	"github.com/example/pr-ai-teammate/internal/github"
 	"github.com/example/pr-ai-teammate/internal/orchestrator"
@@ -23,7 +24,8 @@ func main() {
 
 	githubToken := os.Getenv("GITHUB_TOKEN")
 	githubClient := github.NewClient(githubToken)
-	orchestratorService := orchestrator.NewService(githubClient)
+	reviewer := ai.NewReviewer(os.Getenv("OPENAI_API_KEY"))
+	orchestratorService := orchestrator.NewService(githubClient, reviewer)
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	handlers := api.NewHandlers(orchestratorService, webhookSecret)
 

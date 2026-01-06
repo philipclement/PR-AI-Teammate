@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,13 @@ type PullRequest struct {
 	Head struct {
 		SHA string `json:"sha"`
 	} `json:"head"`
+}
+
+type ReviewComment struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Body string `json:"body"`
+	Side string `json:"side"`
 }
 
 func NewClient(token string) *Client {
@@ -82,6 +90,40 @@ func (c *Client) FetchPullRequestDiff(ctx context.Context, repo string, number i
 		return "", fmt.Errorf("github pull request diff fetch failed: %s", body)
 	}
 	return body, nil
+}
+
+func (c *Client) CreatePullRequestReview(ctx context.Context, repo string, number int, commitSHA string, body string, comments []ReviewComment) error {
+	if c == nil {
+		return fmt.Errorf("github client is not configured")
+	}
+	url := fmt.Sprintf("%s/repos/%s/pulls/%d/reviews", c.baseURL, repo, number)
+	payload := map[string]any{
+		"body":      body,
+		"event":     "COMMENT",
+		"commit_id": commitSHA,
+		"comments":  comments,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	response, status, err := c.do(req)
+	if err != nil {
+		return err
+	}
+	if status >= 300 {
+		return fmt.Errorf("github review creation failed: %s", response)
+	}
+	return nil
 }
 
 func (c *Client) do(req *http.Request) (string, int, error) {

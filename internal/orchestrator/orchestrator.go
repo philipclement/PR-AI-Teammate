@@ -5,15 +5,35 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/example/pr-ai-teammate/internal/ai"
+	"github.com/example/pr-ai-teammate/internal/analysis"
 	"github.com/example/pr-ai-teammate/internal/github"
+	"github.com/example/pr-ai-teammate/internal/review"
+	"github.com/example/pr-ai-teammate/internal/rules"
 )
 
 type Service struct {
-	githubClient *github.Client
+	githubClient GitHubClient
+	reviewer     Reviewer
+	rulesEngine  *rules.Engine
 }
 
-func NewService(githubClient *github.Client) *Service {
-	return &Service{githubClient: githubClient}
+type GitHubClient interface {
+	FetchPullRequest(ctx context.Context, repo string, number int) (github.PullRequest, error)
+	FetchPullRequestDiff(ctx context.Context, repo string, number int) (string, error)
+	CreatePullRequestReview(ctx context.Context, repo string, number int, commitSHA string, body string, comments []github.ReviewComment) error
+}
+
+type Reviewer interface {
+	Review(ctx context.Context, input ai.ReviewInput) ([]analysis.Issue, string, error)
+}
+
+func NewService(githubClient GitHubClient, reviewer Reviewer) *Service {
+	return &Service{
+		githubClient: githubClient,
+		reviewer:     reviewer,
+		rulesEngine:  rules.NewDefaultEngine(),
+	}
 }
 
 type AnalyzeInput struct {
@@ -50,8 +70,48 @@ func (s *Service) AnalyzePR(ctx context.Context, input AnalyzeInput) (AnalyzeRes
 		return AnalyzeResult{}, err
 	}
 
-	// TODO: split diff by file, run rule engine, static analysis, and AI reviewer.
-	summary := fmt.Sprintf("analysis queued for %s#%d (%s) with %d diff bytes",
+	files, err := analysis.ParseUnifiedDiff(diff)
+	if err != nil {
+		return AnalyzeResult{}, err
+	}
+
+	issues := s.rulesEngine.Run(files)
+	issues = append(issues, analysis.RunStaticAnalysis(files)...)
+
+	aiSummary := ""
+	if s.reviewer != nil {
+		aiIssues, summary, err := s.reviewer.Review(ctx, ai.ReviewInput{
+			Title: pr.Title,
+			Body:  pr.Body,
+			Diff:  diff,
+		})
+		if err != nil {
+			return AnalyzeResult{}, err
+		}
+		issues = append(issues, aiIssues...)
+		aiSummary = summary
+	}
+
+	reviewResult := review.Generate(issues)
+	if aiSummary != "" {
+		reviewResult.Summary = fmt.Sprintf("%s\n\n%s", reviewResult.Summary, aiSummary)
+	}
+
+	var comments []github.ReviewComment
+	for _, comment := range reviewResult.Comments {
+		comments = append(comments, github.ReviewComment{
+			Path: comment.Path,
+			Line: comment.Line,
+			Body: comment.Body,
+			Side: "RIGHT",
+		})
+	}
+
+	if err := s.githubClient.CreatePullRequestReview(ctx, input.Repository, input.PullNumber, input.CommitSHA, reviewResult.Summary, comments); err != nil {
+		return AnalyzeResult{}, err
+	}
+
+	summary := fmt.Sprintf("analysis completed for %s#%d (%s) with %d diff bytes",
 		input.Repository,
 		input.PullNumber,
 		strings.TrimSpace(pr.Title),

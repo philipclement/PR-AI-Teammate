@@ -92,6 +92,35 @@ func (c *Client) FetchPullRequestDiff(ctx context.Context, repo string, number i
 	return body, nil
 }
 
+func (c *Client) FetchFileContent(ctx context.Context, repo string, path string, ref string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("github client is not configured")
+	}
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	url := fmt.Sprintf("%s/repos/%s/contents/%s", c.baseURL, repo, path)
+	if ref != "" {
+		url = fmt.Sprintf("%s?ref=%s", url, ref)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github.raw")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	body, status, err := c.do(req)
+	if err != nil {
+		return "", err
+	}
+	if status >= 300 {
+		return "", fmt.Errorf("github content fetch failed: %s", body)
+	}
+	return body, nil
+}
+
 func (c *Client) CreatePullRequestReview(ctx context.Context, repo string, number int, commitSHA string, body string, comments []ReviewComment) error {
 	if c == nil {
 		return fmt.Errorf("github client is not configured")

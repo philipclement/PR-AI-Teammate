@@ -14,6 +14,7 @@ import (
 	"github.com/example/pr-ai-teammate/internal/api"
 	"github.com/example/pr-ai-teammate/internal/github"
 	"github.com/example/pr-ai-teammate/internal/orchestrator"
+	"github.com/example/pr-ai-teammate/internal/storage"
 )
 
 func main() {
@@ -24,8 +25,16 @@ func main() {
 
 	githubToken := os.Getenv("GITHUB_TOKEN")
 	githubClient := github.NewClient(githubToken)
-	reviewer := ai.NewReviewer(os.Getenv("OPENAI_API_KEY"))
-	orchestratorService := orchestrator.NewService(githubClient, reviewer)
+	reviewer := ai.NewReviewer(
+		os.Getenv("OPENAI_API_KEY"),
+		os.Getenv("OPENAI_BASE_URL"),
+		os.Getenv("OPENAI_MODEL"),
+	)
+	store, err := storage.NewStore(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatalf("store error: %v", err)
+	}
+	orchestratorService := orchestrator.NewService(githubClient, reviewer, store)
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	handlers := api.NewHandlers(orchestratorService, webhookSecret)
 

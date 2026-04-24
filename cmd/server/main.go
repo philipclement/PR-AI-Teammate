@@ -43,13 +43,14 @@ func main() {
 	q.Start(context.Background(), orchestratorService)
 
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
-	handlers := api.NewHandlers(q, webhookSecret)
+	handlers := api.NewHandlers(q, store, webhookSecret)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", methodGuard(handlers.Health, http.MethodGet, http.MethodHead))
 	mux.HandleFunc("/health/", methodGuard(handlers.Health, http.MethodGet, http.MethodHead))
 	mux.HandleFunc("/webhook/github", methodGuard(handlers.WebhookGitHub, http.MethodPost))
 	mux.HandleFunc("/analyze/pr", methodGuard(handlers.AnalyzePR, http.MethodPost))
+	mux.HandleFunc("/feedback", methodGuard(handlers.Feedback, http.MethodPost))
 	mux.HandleFunc("/", notFoundHandler)
 
 	server := &http.Server{

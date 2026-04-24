@@ -2,17 +2,21 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/example/pr-ai-teammate/internal/orchestrator"
 )
+
+// ── stubs ─────────────────────────────────────────────────────────────────────
 
 type stubEnqueuer struct {
 	called bool
@@ -26,8 +30,26 @@ func (s *stubEnqueuer) Enqueue(input orchestrator.AnalyzeInput) error {
 	return s.err
 }
 
+type stubFeedbackRecorder struct {
+	called   bool
+	lastRepo string
+	lastRule string
+	lastAcc  bool
+	err      error
+}
+
+func (s *stubFeedbackRecorder) RecordFeedback(_ context.Context, repo, ruleID string, accepted bool) error {
+	s.called = true
+	s.lastRepo = repo
+	s.lastRule = ruleID
+	s.lastAcc = accepted
+	return s.err
+}
+
+// ── health ────────────────────────────────────────────────────────────────────
+
 func TestHealth(t *testing.T) {
-	handlers := NewHandlers(&stubEnqueuer{}, "")
+	handlers := NewHandlers(&stubEnqueuer{}, nil, "")
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	res := httptest.NewRecorder()
 
@@ -41,8 +63,10 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+// ── webhook ───────────────────────────────────────────────────────────────────
+
 func TestWebhookGitHubMissingHeader(t *testing.T) {
-	handlers := NewHandlers(&stubEnqueuer{}, "")
+	handlers := NewHandlers(&stubEnqueuer{}, nil, "")
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", nil)
 	res := httptest.NewRecorder()
 
@@ -54,7 +78,7 @@ func TestWebhookGitHubMissingHeader(t *testing.T) {
 }
 
 func TestWebhookGitHubIgnoredEvent(t *testing.T) {
-	handlers := NewHandlers(&stubEnqueuer{}, "")
+	handlers := NewHandlers(&stubEnqueuer{}, nil, "")
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", nil)
 	req.Header.Set("X-GitHub-Event", "ping")
 	res := httptest.NewRecorder()
@@ -68,7 +92,7 @@ func TestWebhookGitHubIgnoredEvent(t *testing.T) {
 
 func TestWebhookGitHubDispatchesAnalysis(t *testing.T) {
 	stub := &stubEnqueuer{}
-	handlers := NewHandlers(stub, "")
+	handlers := NewHandlers(stub, nil, "")
 
 	payload := map[string]any{
 		"action": "opened",
@@ -111,7 +135,7 @@ func TestWebhookGitHubDispatchesAnalysis(t *testing.T) {
 
 func TestWebhookGitHubQueueFull(t *testing.T) {
 	stub := &stubEnqueuer{err: errors.New("queue is full")}
-	handlers := NewHandlers(stub, "")
+	handlers := NewHandlers(stub, nil, "")
 
 	payload := map[string]any{
 		"action": "opened",
@@ -138,7 +162,7 @@ func TestWebhookGitHubQueueFull(t *testing.T) {
 }
 
 func TestWebhookGitHubPayloadTooLarge(t *testing.T) {
-	handlers := NewHandlers(&stubEnqueuer{}, "")
+	handlers := NewHandlers(&stubEnqueuer{}, nil, "")
 	bigPayload := bytes.Repeat([]byte("a"), 1<<20+1) // 1 MB + 1 byte
 
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(bigPayload))
@@ -153,7 +177,7 @@ func TestWebhookGitHubPayloadTooLarge(t *testing.T) {
 }
 
 func TestWebhookGitHubSignatureMissing(t *testing.T) {
-	handlers := NewHandlers(&stubEnqueuer{}, "secret")
+	handlers := NewHandlers(&stubEnqueuer{}, nil, "secret")
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewBufferString(`{"action":"opened"}`))
 	req.Header.Set("X-GitHub-Event", "pull_request")
 	res := httptest.NewRecorder()
@@ -167,7 +191,7 @@ func TestWebhookGitHubSignatureMissing(t *testing.T) {
 
 func TestWebhookGitHubSignatureValid(t *testing.T) {
 	stub := &stubEnqueuer{}
-	handlers := NewHandlers(stub, "secret")
+	handlers := NewHandlers(stub, nil, "secret")
 
 	payload := map[string]any{
 		"action": "opened",
@@ -200,8 +224,10 @@ func TestWebhookGitHubSignatureValid(t *testing.T) {
 	}
 }
 
+// ── analyze ───────────────────────────────────────────────────────────────────
+
 func TestAnalyzePRInvalidJSON(t *testing.T) {
-	handlers := NewHandlers(&stubEnqueuer{}, "")
+	handlers := NewHandlers(&stubEnqueuer{}, nil, "")
 	req := httptest.NewRequest(http.MethodPost, "/analyze/pr", bytes.NewBufferString("not-json"))
 	res := httptest.NewRecorder()
 
@@ -214,7 +240,7 @@ func TestAnalyzePRInvalidJSON(t *testing.T) {
 
 func TestAnalyzePRAcceptsRequest(t *testing.T) {
 	stub := &stubEnqueuer{}
-	handlers := NewHandlers(stub, "")
+	handlers := NewHandlers(stub, nil, "")
 
 	payload := map[string]any{
 		"repository":  "acme/demo",
@@ -238,6 +264,124 @@ func TestAnalyzePRAcceptsRequest(t *testing.T) {
 		t.Fatalf("expected enqueuer to be called")
 	}
 }
+
+// ── feedback ──────────────────────────────────────────────────────────────────
+
+func TestFeedbackNotConfigured(t *testing.T) {
+	handlers := NewHandlers(&stubEnqueuer{}, nil, "")
+	req := httptest.NewRequest(http.MethodPost, "/feedback", bytes.NewBufferString(`{}`))
+	res := httptest.NewRecorder()
+
+	handlers.Feedback(res, req)
+
+	if res.Code != http.StatusNotImplemented {
+		t.Fatalf("expected status 501, got %d", res.Code)
+	}
+}
+
+func TestFeedbackInvalidJSON(t *testing.T) {
+	handlers := NewHandlers(&stubEnqueuer{}, &stubFeedbackRecorder{}, "")
+	req := httptest.NewRequest(http.MethodPost, "/feedback", bytes.NewBufferString("not-json"))
+	res := httptest.NewRecorder()
+
+	handlers.Feedback(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", res.Code)
+	}
+}
+
+func TestFeedbackMissingFields(t *testing.T) {
+	handlers := NewHandlers(&stubEnqueuer{}, &stubFeedbackRecorder{}, "")
+
+	cases := []string{
+		`{"rule_id":"secrets","accepted":true}`,         // missing repository
+		`{"repository":"acme/demo","accepted":false}`,   // missing rule_id
+		`{}`,                                            // missing both
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/feedback", bytes.NewBufferString(body))
+		res := httptest.NewRecorder()
+		handlers.Feedback(res, req)
+		if res.Code != http.StatusBadRequest {
+			t.Errorf("body %q: expected 400, got %d", body, res.Code)
+		}
+	}
+}
+
+func TestFeedbackRecordsAccepted(t *testing.T) {
+	stub := &stubFeedbackRecorder{}
+	handlers := NewHandlers(&stubEnqueuer{}, stub, "")
+
+	body, _ := json.Marshal(map[string]any{
+		"repository": "acme/demo",
+		"rule_id":    "secrets",
+		"accepted":   true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/feedback", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+
+	handlers.Feedback(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", res.Code)
+	}
+	if !stub.called {
+		t.Fatal("expected feedback recorder to be called")
+	}
+	if stub.lastRepo != "acme/demo" {
+		t.Errorf("unexpected repo: %q", stub.lastRepo)
+	}
+	if stub.lastRule != "secrets" {
+		t.Errorf("unexpected rule: %q", stub.lastRule)
+	}
+	if !stub.lastAcc {
+		t.Error("expected accepted=true")
+	}
+}
+
+func TestFeedbackRecordsRejected(t *testing.T) {
+	stub := &stubFeedbackRecorder{}
+	handlers := NewHandlers(&stubEnqueuer{}, stub, "")
+
+	body, _ := json.Marshal(map[string]any{
+		"repository": "acme/demo",
+		"rule_id":    "todo",
+		"accepted":   false,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/feedback", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+
+	handlers.Feedback(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", res.Code)
+	}
+	if stub.lastAcc {
+		t.Error("expected accepted=false")
+	}
+}
+
+func TestFeedbackStorageError(t *testing.T) {
+	stub := &stubFeedbackRecorder{err: fmt.Errorf("db connection lost")}
+	handlers := NewHandlers(&stubEnqueuer{}, stub, "")
+
+	body, _ := json.Marshal(map[string]any{
+		"repository": "acme/demo",
+		"rule_id":    "secrets",
+		"accepted":   true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/feedback", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+
+	handlers.Feedback(res, req)
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", res.Code)
+	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 func signPayload(secret string, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))

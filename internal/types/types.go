@@ -18,3 +18,13 @@ type HealthResponse struct {
 type WebhookResponse struct {
 	Status string `json:"status"`
 }
+
+type FeedbackRequest struct {
+	Repository string `json:"repository"`
+	RuleID     string `json:"rule_id"`
+	Accepted   bool   `json:"accepted"`
+}
+
+type FeedbackResponse struct {
+	Status string `json:"status"`
+}

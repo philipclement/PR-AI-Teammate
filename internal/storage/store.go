@@ -15,6 +15,7 @@ type Store interface {
 	UpsertPullRequest(ctx context.Context, repo string, number int, sha string, title string, status string) (int64, error)
 	UpdatePullRequestStatus(ctx context.Context, id int64, status string) error
 	SaveAnalysisResults(ctx context.Context, prID int64, issues []analysis.Issue) error
+	RecordFeedback(ctx context.Context, repo string, ruleID string, accepted bool) error
 }
 
 func NewStore(ctx context.Context, dsn string) (Store, error) {
@@ -24,11 +25,18 @@ func NewStore(ctx context.Context, dsn string) (Store, error) {
 	return NewPostgresStore(ctx, dsn)
 }
 
+type feedbackEntry struct {
+	repo     string
+	ruleID   string
+	accepted bool
+}
+
 type MemoryStore struct {
 	mu        sync.Mutex
 	nextID    int64
 	pulls     map[string]*pullRequestRecord
 	analyses  map[int64][]analysis.Issue
+	feedback  []feedbackEntry
 	updatedAt time.Time
 }
 
@@ -91,6 +99,13 @@ func (m *MemoryStore) SaveAnalysisResults(ctx context.Context, prID int64, issue
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.analyses[prID] = append([]analysis.Issue{}, issues...)
+	return nil
+}
+
+func (m *MemoryStore) RecordFeedback(ctx context.Context, repo string, ruleID string, accepted bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.feedback = append(m.feedback, feedbackEntry{repo: repo, ruleID: ruleID, accepted: accepted})
 	return nil
 }
 
@@ -168,6 +183,13 @@ func (p *PostgresStore) UpsertPullRequest(ctx context.Context, repo string, numb
 
 func (p *PostgresStore) UpdatePullRequestStatus(ctx context.Context, id int64, status string) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE pull_requests SET status = $1, updated_at = NOW() WHERE id = $2`, status, id)
+	return err
+}
+
+func (p *PostgresStore) RecordFeedback(ctx context.Context, repo string, ruleID string, accepted bool) error {
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO review_feedback (repo, rule_id, accepted) VALUES ($1, $2, $3)`,
+		repo, ruleID, accepted)
 	return err
 }
 

@@ -93,15 +93,37 @@ func (s *Service) AnalyzePR(ctx context.Context, input AnalyzeInput) (AnalyzeRes
 		prID = storedID
 	}
 
-	contents := map[string]string{}
-	for _, file := range files {
-		if strings.HasSuffix(strings.ToLower(file.Path), ".go") {
-			body, err := s.githubClient.FetchFileContent(ctx, input.Repository, file.Path, input.CommitSHA)
-			if err != nil {
-				return AnalyzeResult{}, err
-			}
-			contents[file.Path] = body
+	// Collect Go files that need static analysis.
+	var goFiles []analysis.FileDiff
+	for _, f := range files {
+		if strings.HasSuffix(strings.ToLower(f.Path), ".go") {
+			goFiles = append(goFiles, f)
 		}
+	}
+
+	// Fetch Go file contents in parallel. The channel is buffered to len(goFiles)
+	// so goroutines can send without blocking even if we return early on an error.
+	type fileResult struct {
+		path    string
+		content string
+		err     error
+	}
+	resultCh := make(chan fileResult, len(goFiles))
+	for _, f := range goFiles {
+		f := f
+		go func() {
+			body, err := s.githubClient.FetchFileContent(ctx, input.Repository, f.Path, input.CommitSHA)
+			resultCh <- fileResult{path: f.Path, content: body, err: err}
+		}()
+	}
+
+	contents := make(map[string]string, len(goFiles))
+	for range goFiles {
+		r := <-resultCh
+		if r.err != nil {
+			return AnalyzeResult{}, r.err
+		}
+		contents[r.path] = r.content
 	}
 
 	issues := s.rulesEngine.Run(files)

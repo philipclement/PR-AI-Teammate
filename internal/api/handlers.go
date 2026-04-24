@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 
 type Handlers struct {
 	enqueuer      Enqueuer
+	feedback      FeedbackRecorder
 	webhookSecret string
 }
 
@@ -25,9 +27,16 @@ type Enqueuer interface {
 	Enqueue(input orchestrator.AnalyzeInput) error
 }
 
-func NewHandlers(enqueuer Enqueuer, webhookSecret string) *Handlers {
+// FeedbackRecorder persists reviewer accept/reject signals for a given rule.
+// Satisfied by *storage.MemoryStore and *storage.PostgresStore.
+type FeedbackRecorder interface {
+	RecordFeedback(ctx context.Context, repo string, ruleID string, accepted bool) error
+}
+
+func NewHandlers(enqueuer Enqueuer, feedback FeedbackRecorder, webhookSecret string) *Handlers {
 	return &Handlers{
 		enqueuer:      enqueuer,
+		feedback:      feedback,
 		webhookSecret: webhookSecret,
 	}
 }
@@ -114,6 +123,28 @@ func (h *Handlers) AnalyzePR(w http.ResponseWriter, r *http.Request) {
 		Status:  "queued",
 		Message: "analysis dispatched",
 	})
+}
+
+func (h *Handlers) Feedback(w http.ResponseWriter, r *http.Request) {
+	if h.feedback == nil {
+		respondError(w, http.StatusNotImplemented, "feedback recording not configured")
+		return
+	}
+	var req types.FeedbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Repository == "" || req.RuleID == "" {
+		respondError(w, http.StatusBadRequest, "repository and rule_id are required")
+		return
+	}
+	if err := h.feedback.RecordFeedback(r.Context(), req.Repository, req.RuleID, req.Accepted); err != nil {
+		log.Printf("record feedback error: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to record feedback")
+		return
+	}
+	respondJSON(w, http.StatusOK, types.FeedbackResponse{Status: "recorded"})
 }
 
 func respondJSON(w http.ResponseWriter, status int, payload any) {

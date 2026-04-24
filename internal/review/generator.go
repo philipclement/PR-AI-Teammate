@@ -42,17 +42,36 @@ func Generate(issues []analysis.Issue) Result {
 
 	summary := fmt.Sprintf("## Automated Review Summary\n\nIssues detected: %s", strings.Join(summaryParts, ", "))
 
+	// Partition issues: file-level (no specific line) go into the summary body;
+	// inline issues (file + line) become review comments.
+	var fileLevelIssues []analysis.Issue
 	comments := make([]Comment, 0, len(issues))
+
 	for _, issue := range issues {
-		if issue.File == "" || issue.Line == 0 {
+		if issue.File == "" {
 			continue
 		}
-		body := fmt.Sprintf("**%s**: %s", issue.RuleID, issue.Message)
+		if issue.Line == 0 {
+			fileLevelIssues = append(fileLevelIssues, issue)
+			continue
+		}
 		comments = append(comments, Comment{
 			Path: issue.File,
 			Line: issue.Line,
-			Body: body,
+			Body: fmt.Sprintf("**%s**: %s", issue.RuleID, issue.Message),
 		})
+	}
+
+	if len(fileLevelIssues) > 0 {
+		sort.Slice(fileLevelIssues, func(i, j int) bool {
+			return fileLevelIssues[i].File < fileLevelIssues[j].File
+		})
+		var sb strings.Builder
+		sb.WriteString("\n\n**File-level findings:**")
+		for _, issue := range fileLevelIssues {
+			sb.WriteString(fmt.Sprintf("\n- `%s` — **%s**: %s", issue.File, issue.RuleID, issue.Message))
+		}
+		summary += sb.String()
 	}
 
 	sort.Slice(comments, func(i, j int) bool {

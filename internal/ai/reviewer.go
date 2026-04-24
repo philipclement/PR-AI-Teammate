@@ -45,14 +45,14 @@ func (r *Reviewer) Review(ctx context.Context, input ReviewInput) ([]analysis.Is
 		diff = diff[:8000] + "\n...diff truncated..."
 	}
 
-	prompt := buildPrompt(input.Title, input.Body, diff)
 	request := chatCompletionRequest{
 		Model: r.model,
 		Messages: []chatMessage{
-			{Role: "system", Content: "You are a senior software engineer performing a code review."},
-			{Role: "user", Content: prompt},
+			{Role: "system", Content: "You are a senior software engineer performing a code review. You must respond with valid JSON."},
+			{Role: "user", Content: buildPrompt(input.Title, input.Body, diff)},
 		},
-		Temperature: 0.2,
+		Temperature:    0.2,
+		ResponseFormat: &responseFormat{Type: "json_object"},
 	}
 
 	payload, err := json.Marshal(request)
@@ -85,7 +85,29 @@ func (r *Reviewer) Review(ctx context.Context, input ReviewInput) ([]analysis.Is
 		return nil, "", fmt.Errorf("ai reviewer returned no choices")
 	}
 
-	return nil, strings.TrimSpace(response.Choices[0].Message.Content), nil
+	content := strings.TrimSpace(response.Choices[0].Message.Content)
+
+	var parsed aiReviewResponse
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		// Model didn't return valid JSON; treat the whole response as a summary with no inline issues.
+		return nil, content, nil
+	}
+
+	var issues []analysis.Issue
+	for _, item := range parsed.Issues {
+		if item.File == "" || item.Line <= 0 {
+			continue
+		}
+		issues = append(issues, analysis.Issue{
+			File:     item.File,
+			Line:     item.Line,
+			RuleID:   "ai-review",
+			Severity: normalizeSeverity(item.Severity),
+			Message:  item.Message,
+		})
+	}
+
+	return issues, parsed.Summary, nil
 }
 
 type ReviewInput struct {
@@ -94,10 +116,28 @@ type ReviewInput struct {
 	Diff  string
 }
 
+// aiReviewResponse is the JSON schema we ask the model to return.
+type aiReviewResponse struct {
+	Summary string    `json:"summary"`
+	Issues  []aiIssue `json:"issues"`
+}
+
+type aiIssue struct {
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
 type chatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Temperature float32       `json:"temperature"`
+	Model          string          `json:"model"`
+	Messages       []chatMessage   `json:"messages"`
+	Temperature    float32         `json:"temperature"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+}
+
+type responseFormat struct {
+	Type string `json:"type"`
 }
 
 type chatMessage struct {
@@ -114,17 +154,40 @@ type chatCompletionResponse struct {
 	} `json:"error"`
 }
 
-func buildPrompt(title string, body string, diff string) string {
-	return fmt.Sprintf(`Review this PR for architectural concerns, performance risks, security issues, maintainability, and API design.
+func buildPrompt(title, body, diff string) string {
+	return fmt.Sprintf(`Review this pull request and return your findings as JSON.
 
-For each issue:
-- Explain why it matters
-- Suggest a concrete improvement
-- Reference specific lines when possible
+For each inline issue, provide:
+- "file": exact file path from the diff header (e.g. "internal/foo/bar.go")
+- "line": line number in the new file — use the +N value from the @@ hunk header as your starting point
+- "severity": one of "high", "medium", or "low"
+- "message": concise explanation of the issue and a concrete improvement suggestion
+
+Also provide a "summary" covering architectural concerns, performance risks, security issues,
+maintainability, and API design.
+
+Respond with ONLY this JSON (no markdown fences, no extra text):
+{
+  "summary": "...",
+  "issues": [
+    {"file": "...", "line": 0, "severity": "...", "message": "..."}
+  ]
+}
 
 PR Title: %s
 PR Description: %s
 
 Diff:
 %s`, title, body, diff)
+}
+
+func normalizeSeverity(s string) string {
+	switch strings.ToLower(s) {
+	case "high":
+		return "high"
+	case "low":
+		return "low"
+	default:
+		return "medium"
+	}
 }

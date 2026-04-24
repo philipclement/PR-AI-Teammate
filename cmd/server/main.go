@@ -14,8 +14,11 @@ import (
 	"github.com/example/pr-ai-teammate/internal/api"
 	"github.com/example/pr-ai-teammate/internal/github"
 	"github.com/example/pr-ai-teammate/internal/orchestrator"
+	"github.com/example/pr-ai-teammate/internal/queue"
 	"github.com/example/pr-ai-teammate/internal/storage"
 )
+
+var _ api.Enqueuer = (*queue.Queue)(nil)
 
 func main() {
 	port := os.Getenv("PORT")
@@ -35,8 +38,12 @@ func main() {
 		log.Fatalf("store error: %v", err)
 	}
 	orchestratorService := orchestrator.NewService(githubClient, reviewer, store)
+
+	q := queue.New(queue.DefaultBufferSize)
+	q.Start(context.Background(), orchestratorService)
+
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
-	handlers := api.NewHandlers(orchestratorService, webhookSecret)
+	handlers := api.NewHandlers(q, webhookSecret)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", methodGuard(handlers.Health, http.MethodGet, http.MethodHead))
@@ -59,7 +66,9 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		shutdownErr <- server.Shutdown(ctx)
+		err := server.Shutdown(ctx)
+		q.Shutdown() // drain queued jobs now that no new requests are accepted
+		shutdownErr <- err
 	}()
 
 	log.Printf("server listening on :%s", port)

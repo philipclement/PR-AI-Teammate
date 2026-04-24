@@ -1,11 +1,11 @@
 package api
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,19 +17,17 @@ import (
 )
 
 type Handlers struct {
-	orchestrator  Analyzer
+	enqueuer      Enqueuer
 	webhookSecret string
 }
 
-type Analyzer interface {
-	AnalyzePR(ctx context.Context, input orchestrator.AnalyzeInput) (orchestrator.AnalyzeResult, error)
+type Enqueuer interface {
+	Enqueue(input orchestrator.AnalyzeInput) error
 }
 
-var _ Analyzer = (*orchestrator.Service)(nil)
-
-func NewHandlers(orchestrator Analyzer, webhookSecret string) *Handlers {
+func NewHandlers(enqueuer Enqueuer, webhookSecret string) *Handlers {
 	return &Handlers{
-		orchestrator:  orchestrator,
+		enqueuer:      enqueuer,
 		webhookSecret: webhookSecret,
 	}
 }
@@ -45,8 +43,13 @@ func (h *Handlers) WebhookGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
+		if errors.As(err, new(*http.MaxBytesError)) {
+			respondError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		respondError(w, http.StatusBadRequest, "unable to read request body")
 		return
 	}
@@ -77,18 +80,18 @@ func (h *Handlers) WebhookGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.orchestrator.AnalyzePR(r.Context(), orchestrator.AnalyzeInput{
+	input := orchestrator.AnalyzeInput{
 		Repository: prEvent.Repository.FullName,
 		PullNumber: prEvent.PullRequest.Number,
 		CommitSHA:  prEvent.PullRequest.Head.SHA,
-	})
-	if err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+	}
+	if err := h.enqueuer.Enqueue(input); err != nil {
+		respondError(w, http.StatusServiceUnavailable, "analysis queue is full")
 		return
 	}
 
 	log.Printf("queued analysis for %s#%d (%s)", prEvent.Repository.FullName, prEvent.PullRequest.Number, prEvent.PullRequest.Head.SHA)
-	respondJSON(w, http.StatusAccepted, types.WebhookResponse{Status: result.Summary})
+	respondJSON(w, http.StatusAccepted, types.WebhookResponse{Status: "queued"})
 }
 
 func (h *Handlers) AnalyzePR(w http.ResponseWriter, r *http.Request) {
@@ -98,19 +101,18 @@ func (h *Handlers) AnalyzePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.orchestrator.AnalyzePR(r.Context(), orchestrator.AnalyzeInput{
+	if err := h.enqueuer.Enqueue(orchestrator.AnalyzeInput{
 		Repository: req.Repository,
 		PullNumber: req.PullNumber,
 		CommitSHA:  req.CommitSHA,
-	})
-	if err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+	}); err != nil {
+		respondError(w, http.StatusServiceUnavailable, "analysis queue is full")
 		return
 	}
 
 	respondJSON(w, http.StatusAccepted, types.AnalyzeResponse{
 		Status:  "queued",
-		Message: result.Summary,
+		Message: "analysis dispatched",
 	})
 }
 
